@@ -162,15 +162,23 @@ def run(df: pd.DataFrame, utt_col: str, resp_col: str, rules: dict,
         review = m["_review"]
         res = res.drop(columns="_review")
 
+    crossed = pd.Series(False, index=res.index)
+    if model is None:
+        # 규칙만 쓸 때: 보조 이슈에 나온 다른 관련시스템도 관련시스템 칸에 함께 붙인다
+        # 예) 대표 음성합성 + 보조 GA·기가지니 UI 오류 → "음성합성, GA"
+        merged_sys = []
+        for sys_, sec in zip(res["관련시스템"], res["보조 이슈"]):
+            others = [lbl.split("·")[0] for lbl in str(sec).split(", ") if lbl and lbl.split("·")[0] != sys_]
+            merged_sys.append(local_model.join_systems([sys_] + others) if others else sys_)
+        crossed = pd.Series([m != o for m, o in zip(merged_sys, res["관련시스템"])], index=res.index)
+        res["관련시스템"] = merged_sys
+
     need = ((res["신뢰도"] < p["review_threshold"])
             | res["관련시스템"].map(lambda v: any(t in str(v).split(", ") for t in p.get("always_review_types", [])))
             | res["등급"].isin(p.get("always_review_grades", []))
             | (res["관련시스템"] == "미분류")
-            | review)
-    if model is None:  # 규칙만 쓸 때: 서로 다른 관련시스템 이슈가 섞이면 검토
-        need |= pd.Series([p.get("review_cross_system", True) and any(
-            lbl.split("·")[0] != sys for lbl in str(sec).split(", ") if lbl)
-            for sys, sec in zip(res["관련시스템"], res["보조 이슈"])], index=res.index)
+            | review
+            | (crossed & bool(p.get("review_cross_system", False))))
     res["검토 필요"] = need.map({True: "Y", False: "N"})
 
     # 이미 결과 컬럼이 있는 시트(이전 리포트)를 다시 넣어도 덮어쓰도록

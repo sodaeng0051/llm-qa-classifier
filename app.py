@@ -51,7 +51,10 @@ with st.sidebar:
     prm["low_overlap"] = st.slider("발화-응답 연관도 '낮음' 기준", 0.0, 0.5, float(prm["low_overlap"]), 0.01)
     prm["always_review_types"] = st.multiselect("항상 검토할 관련시스템", ISSUE_TYPES, prm.get("always_review_types", []))
     prm["always_review_grades"] = st.multiselect("항상 검토할 등급", GRADES, prm.get("always_review_grades", []))
-    prm["review_cross_system"] = st.toggle("서로 다른 관련시스템 이슈가 섞이면 검토", prm.get("review_cross_system", True))
+    prm["review_cross_system"] = st.toggle(
+        "관련시스템이 여러 개면 검토 (규칙만 쓸 때)", prm.get("review_cross_system", False),
+        help="관련시스템은 여러 개(예: 음성합성, GA)가 나올 수 있습니다. 켜면 규칙만으로 분류할 때 "
+             "여러 개로 나온 행을 검토 필요로 표시합니다. 학습 모델 사용 시에는 적용되지 않습니다.")
 
     with st.expander("분석 규칙 편집 (정규식, 한 줄에 하나)"):
         groups = [("발화: 정보성 질문", "utterance", "question"), ("발화: 기능 실행 요청", "utterance", "command"),

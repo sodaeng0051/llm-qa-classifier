@@ -105,7 +105,7 @@ DEFAULT_RULES = {
         "stt_mismatch": 0.75,         # STT 결과 컬럼이 있을 때 발화와 유사도가 이보다 낮으면 인식 오류
         "always_review_types": [],
         "always_review_grades": ["Critical"],  # 이 등급은 항상 검토 필요
-        "review_cross_system": True,  # 문제점에 서로 다른 관련시스템 이슈가 섞이면 검토 필요
+        "review_cross_system": False,  # (규칙만 쓸 때) 관련시스템이 여러 개로 나오면 검토 필요로 표시
     },
 }
 
