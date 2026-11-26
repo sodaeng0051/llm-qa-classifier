@@ -7,7 +7,7 @@ import pandas as pd
 
 from . import model as local_model
 from .analyzer import INTENT_LABELS, RESPONSE_LABELS, analyze
-from .classifier import analysis_note, apply_grade_override, judge_with_desc
+from .classifier import analysis_note, apply_grade_override, judge_with_desc, match_desc
 from .testsheet import is_test_sheet, parse_test_sheet
 
 # 앞쪽 별칭일수록 우선. 값이 전부 비어 있는 컬럼은 건너뛴다.
@@ -120,9 +120,17 @@ def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
     grade = pr["grade"] or rule_row["등급"]
     grade, note = apply_grade_override(desc or "", grade, rules)
 
-    parts = []
+    # 세부 이슈·근거 문구는 최종 관련시스템과 맞는 규칙에서만 가져온다 (설명이 판정과 어긋나지 않도록)
+    sub, rule_reason, rule_note = "", "", ""
     if rule_hit:
-        parts.append(str(rule_row["판단 근거"]).split(" · 등급 보정")[0])
+        hits = match_desc(desc or "", rules)
+        same = [h for h in hits if h[1]["type"] in systems]
+        if same:
+            _, r0, ph = same[0]
+            sub, rule_reason = r0.get("sub", ""), f"{r0['reason']} [근거: '{ph}']"
+        else:
+            rule_note = f"키워드 규칙은 '{rule_row['관련시스템']}'로 보았으나 과거 판정 기준으로 다르게 판단"
+    parts = [rule_reason] if rule_reason else []
     nb = pr["neighbors"][0] if pr["neighbors"] else None
     if nb:
         snippet = re.sub(r"\s+", " ", nb["문제점"]).strip()[:45]
@@ -130,6 +138,8 @@ def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
                      f"{nb['관련시스템'] or '-'} / {nb['등급'] or '-'} (유사도 {nb['sim']:.0%})")
     if note:
         parts.append(f"등급 보정({note})")
+    if rule_note:
+        parts.append(rule_note)
 
     sys_str = local_model.join_systems(systems) or rule_row["관련시스템"]
     # 아주 비슷한 과거 이슈와 판정이 다르면 검토 (과거 판정 자체가 회차마다 다를 수 있음)
@@ -140,7 +150,7 @@ def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
         parts.append("유사 과거 이슈와 판정이 달라 확인 필요")
     if novel:
         parts.append("비슷한 과거 이슈가 없어 확인 필요 (새 유형일 수 있음)")
-    return {"관련시스템": sys_str, "등급": grade, "세부 이슈": rule_row["세부 이슈"] if rule_hit else "",
+    return {"관련시스템": sys_str, "등급": grade, "세부 이슈": sub,
             "판단 근거": " · ".join(parts) or rule_row["판단 근거"], "신뢰도": pr["confidence"],
             "_review": disagree or novel}
 
