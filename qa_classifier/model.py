@@ -21,6 +21,10 @@ BASE_PATH = ROOT / "training" / "base_labeled.csv"
 DATA_DIR = ROOT / "data"
 LABELED_PATH = DATA_DIR / "labeled.csv"
 MODEL_PATH = DATA_DIR / "model.pkl"
+GUIDE_BASE = ROOT / "training" / "guideline.csv"   # 관련시스템 분류표 (기본)
+GUIDE_USER = DATA_DIR / "guideline.csv"            # 앱에서 수정한 분류표 (있으면 이것을 사용)
+GUIDE_WEIGHT = 5   # 분류표 문장을 학습 데이터에 몇 번 넣을지 (3~5배에서 정확도 가장 좋았음)
+GUIDE_SOURCE = "분류표"
 
 SYSTEMS = ["음성인식", "음성합성", "대화 정책", "GA", "홈포털"]   # 표기 순서
 GRADES = ["Critical", "Major", "Minor", "Request"]
@@ -64,6 +68,43 @@ def extract_labeled(df: pd.DataFrame, utt_col: str, resp_col: str, issue_col: st
     return out[(out["등급"] != "") | (out["관련시스템"] != "")].reset_index(drop=True)
 
 
+# ───────────────────────── 관련시스템 분류표 ─────────────────────────
+def load_guideline() -> pd.DataFrame:
+    """관련시스템 · 판단 기준 · 대표 이슈(쉼표 구분)."""
+    path = GUIDE_USER if GUIDE_USER.exists() else GUIDE_BASE
+    if not path.exists():
+        return pd.DataFrame(columns=["관련시스템", "판단 기준", "대표 이슈"])
+    return pd.read_csv(path, dtype=str).reindex(columns=["관련시스템", "판단 기준", "대표 이슈"]).fillna("")
+
+
+def save_guideline(df: pd.DataFrame) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    df = df.reindex(columns=["관련시스템", "판단 기준", "대표 이슈"]).fillna("").astype(str)
+    df = df[df["관련시스템"].map(lambda v: bool(norm_systems(v)))]
+    df.to_csv(GUIDE_USER, index=False, encoding="utf-8-sig")
+    MODEL_PATH.unlink(missing_ok=True)
+
+
+def reset_guideline() -> None:
+    GUIDE_USER.unlink(missing_ok=True)
+    MODEL_PATH.unlink(missing_ok=True)
+
+
+def guideline_rows(weight: int = GUIDE_WEIGHT) -> pd.DataFrame:
+    """분류표의 판단 기준·대표 이슈 문장을 '문제점 → 관련시스템' 학습 행으로 만든다 (등급 없음)."""
+    rows = []
+    for r in load_guideline().itertuples(index=False):
+        systems = join_systems(norm_systems(r.관련시스템))
+        if not systems:
+            continue
+        texts = [r[1]] + [t.strip() for t in re.split(r"[,\n]", r[2]) if t.strip()]
+        for t in texts:
+            if t.strip():
+                rows += [{"출처": GUIDE_SOURCE, "순번": "", "사용자 발화": "", "실제 응답": "", "문제점": t.strip(),
+                          "등급": "", "관련시스템": systems}] * weight
+    return pd.DataFrame(rows, columns=COLS)
+
+
 # ───────────────────────── 학습 데이터 관리 ─────────────────────────
 def load_training() -> pd.DataFrame:
     frames = [pd.read_csv(p, dtype=str).reindex(columns=COLS).fillna("")
@@ -96,7 +137,8 @@ def training_summary() -> dict:
     return {"total": len(t), "base": int(pd.read_csv(BASE_PATH).shape[0]) if BASE_PATH.exists() else 0,
             "added": int(pd.read_csv(LABELED_PATH).shape[0]) if LABELED_PATH.exists() else 0,
             "sources": t["출처"].value_counts().to_dict(),
-            "grade": int((t["등급"] != "").sum()), "system": int((t["관련시스템"] != "").sum())}
+            "grade": int((t["등급"] != "").sum()), "system": int((t["관련시스템"] != "").sum()),
+            "guideline": len(load_guideline()), "guideline_custom": GUIDE_USER.exists()}
 
 
 def labeled_count() -> int:
@@ -121,13 +163,17 @@ def _vectorizer():
                       TfidfVectorizer(analyzer="word", ngram_range=(1, 2), min_df=2, sublinear_tf=True))
 
 
-def _fit(t: pd.DataFrame) -> dict:
+def _fit(t: pd.DataFrame, guide: bool = True) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import normalize
 
+    if guide:
+        t = pd.concat([t, guideline_rows()], ignore_index=True)
+
     vec = _vectorizer().fit(_text(t["사용자 발화"], t["실제 응답"], t["문제점"]))
     X = normalize(vec.transform(_text(t["사용자 발화"], t["실제 응답"], t["문제점"])))
-    m = {"vec": vec, "X": X, "meta": t.reset_index(drop=True), "grade": None, "systems": {}}
+    real = (t["출처"] != GUIDE_SOURCE).to_numpy()   # 판단 근거(유사 과거 이슈)는 실제 이슈에서만 찾는다
+    m = {"vec": vec, "X": X[real], "meta": t[real].reset_index(drop=True), "grade": None, "systems": {}}
     g = (t["등급"] != "").to_numpy()
     if g.sum() >= MIN_SAMPLES and t.loc[g, "등급"].nunique() >= 2:
         m["grade"] = LogisticRegression(C=10, max_iter=3000, class_weight="balanced").fit(X[g], t.loc[g, "등급"])
@@ -170,7 +216,7 @@ def train(evaluate: bool = True) -> dict:
 
 def load(auto_train: bool = True):
     """저장된 모델을 읽는다. 없거나 학습 데이터보다 오래됐으면 자동으로 다시 학습한다."""
-    sources = [p for p in (BASE_PATH, LABELED_PATH) if p.exists()]
+    sources = [p for p in (BASE_PATH, LABELED_PATH, GUIDE_BASE, GUIDE_USER) if p.exists()]
     stale = MODEL_PATH.exists() and any(p.stat().st_mtime > MODEL_PATH.stat().st_mtime for p in sources)
     if (not MODEL_PATH.exists() or stale) and auto_train and sources:
         try:
