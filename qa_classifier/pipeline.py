@@ -8,6 +8,7 @@ import pandas as pd
 from . import model as local_model
 from .analyzer import INTENT_LABELS, RESPONSE_LABELS, analyze
 from .classifier import analysis_note, apply_grade_override, judge_with_desc
+from .testsheet import is_test_sheet, parse_test_sheet
 
 # 앞쪽 별칭일수록 우선. 값이 전부 비어 있는 컬럼은 건너뛴다.
 COLUMN_ALIASES = {
@@ -54,6 +55,17 @@ def _tidy(raw: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _load(raw: pd.DataFrame) -> pd.DataFrame:
+    """테스트 결과 시트(시험자별 pass/fail)면 실행 1건당 1행으로 펼치고, 아니면 헤더를 찾아 정리한다."""
+    raw = raw.fillna("").astype(str)
+    return parse_test_sheet(raw) if is_test_sheet(raw) else _tidy(raw)
+
+
+def is_test_result(df: pd.DataFrame) -> bool:
+    """read_sheet 결과가 테스트 결과 시트(판정 컬럼 = pass/fail)를 펼친 것인지."""
+    return "판정" in df.columns and "SAID" in df.columns
+
+
 def read_sheet(file, sheet: str | int | None = 0) -> pd.DataFrame:
     name = getattr(file, "name", str(file)).lower()
     if name.endswith((".csv", ".txt")):
@@ -61,12 +73,12 @@ def read_sheet(file, sheet: str | int | None = 0) -> pd.DataFrame:
             try:
                 if hasattr(file, "seek"):
                     file.seek(0)
-                return _tidy(pd.read_csv(file, encoding=enc, dtype=str, header=None,
+                return _load(pd.read_csv(file, encoding=enc, dtype=str, header=None,
                                          keep_default_na=False, skip_blank_lines=False))
             except UnicodeDecodeError:
                 continue
         raise ValueError("CSV 인코딩을 인식하지 못했습니다 (UTF-8 / CP949 지원).")
-    return _tidy(pd.read_excel(file, sheet_name=sheet or 0, dtype=str, header=None))
+    return _load(pd.read_excel(file, sheet_name=sheet or 0, dtype=str, header=None))
 
 
 def detect_columns(df: pd.DataFrame) -> dict:
@@ -81,6 +93,8 @@ def detect_columns(df: pd.DataFrame) -> dict:
             if hit is not None:
                 found[key] = hit
                 break
+    if is_test_result(df):
+        found["result"] = "판정"
     if "utterance" not in found:  # 값이 '"..." 발화' 형식인 컬럼
         for c in filled:
             vals = df[c][df[c].str.strip() != ""]
@@ -133,8 +147,26 @@ def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
 
 def run(df: pd.DataFrame, utt_col: str, resp_col: str, rules: dict,
         stt_col: str | None = None, issue_col: str | None = None, use_model: bool = True,
-        model=None) -> pd.DataFrame:
-    """원본 컬럼은 그대로 두고 분석·분류 결과 컬럼을 덧붙인 DataFrame을 반환."""
+        model=None, result_col: str | None = None) -> pd.DataFrame:
+    """원본 컬럼은 그대로 두고 분석·분류 결과 컬럼을 덧붙인 DataFrame을 반환.
+
+    result_col(pass/fail)이 있으면 pass 행은 '정상'으로 두고 fail 행만 분류한다.
+    """
+    if result_col:
+        passed = df[result_col].astype(str).str.strip().str.lower().eq("pass")
+        parts = []
+        if (~passed).any():
+            parts.append(run(df[~passed], utt_col, resp_col, rules, stt_col, issue_col, use_model, model))
+        if passed.any():
+            parts.append(_pass_rows(df[passed], utt_col, resp_col, issue_col))
+        if not parts:
+            return _assemble(df.iloc[0:0], pd.DataFrame(index=df.index[0:0]), utt_col, resp_col, issue_col)
+        out = pd.concat(parts)
+        out = out.loc[[i for i in df.index if i in out.index]]   # 원래 순서
+        for c in out.columns:
+            if out[c].dtype == object:
+                out[c] = out[c].fillna("")
+        return out
     p = rules["params"]
     df = df[(df[utt_col].astype(str).str.strip() != "")
             | ((df[issue_col].astype(str).str.strip() != "") if issue_col else False)]  # 빈 행(순번만 있는 행) 제외
@@ -181,7 +213,21 @@ def run(df: pd.DataFrame, utt_col: str, resp_col: str, rules: dict,
             | (crossed & bool(p.get("review_cross_system", False))))
     res["검토 필요"] = need.map({True: "Y", False: "N"})
 
+    return _assemble(df, res, utt_col, resp_col, issue_col)
+
+
+def _pass_rows(df: pd.DataFrame, utt_col: str, resp_col: str, issue_col: str | None) -> pd.DataFrame:
+    """테스트 결과 pass 행 = 정상. pass인데 비고가 적힌 경우 판단 근거에 남긴다."""
+    notes = df[issue_col].astype(str).str.strip() if issue_col else pd.Series("", index=df.index)
+    res = pd.DataFrame({"관련시스템": "정상", "세부 이슈": "", "등급": "", "보조 이슈": "",
+                        "판단 근거": ["테스트 결과 pass" + (f" (비고: {n})" if n else "") for n in notes],
+                        "신뢰도": 1.0, "적용 규칙": "PASS", "검토 필요": "N"}, index=df.index)
+    return _assemble(df, res, utt_col, resp_col, issue_col)
+
+
+def _assemble(df, res, utt_col, resp_col, issue_col) -> pd.DataFrame:
     # 이미 결과 컬럼이 있는 시트(이전 리포트)를 다시 넣어도 덮어쓰도록
+    utts = df[utt_col].map(clean_utterance)
     out = df.copy()
     # 시트에 QA가 직접 입력한 등급/관련시스템이 있으면 'XX(QA)'로 보존해 자동 판정과 비교할 수 있게 한다
     for col in ("관련시스템", "등급"):

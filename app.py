@@ -12,7 +12,8 @@ import streamlit as st
 
 from qa_classifier import model as local_model
 from qa_classifier import report
-from qa_classifier.pipeline import detect_columns, read_sheet, run
+from qa_classifier.pipeline import detect_columns, is_test_result, read_sheet, run
+from qa_classifier.testsheet import summary as tester_summary
 from qa_classifier.rules import (GRADE_DESC, GRADES, ISSUE_TYPE_DESC, ISSUE_TYPES, load_rules, reset_rules,
                                  save_rules)
 
@@ -155,8 +156,9 @@ st.title("LLM QA 이슈 자동 분류")
 # ───────────────────────── ① 업로드 ─────────────────────────
 with st.container(border=True):
     st.subheader("① 테스트 결과 업로드")
-    st.caption("‘사용자 발화’, ‘실제 응답’ 컬럼이 있는 시트를 올리세요. 위에 제목줄이 있어도 헤더 행을 자동으로 찾습니다. "
-               "(선택) ‘문제점’ 컬럼이 있으면 QA 기술 내용을 1순위 근거로, ‘STT 결과’ 컬럼이 있으면 음성인식 오류도 판단합니다.")
+    st.caption("세 가지 양식을 받습니다 — ① 테스트 결과 시트(발화·기대결과·시험자별 실행결과 pass/fail·비고), "
+               "② 이슈리스트(방법·기대·문제점·등급·관련시스템), ③ 사용자 발화·실제 응답만 있는 시트. "
+               "위에 제목줄이 있어도 헤더 행을 자동으로 찾습니다. 자세한 형식은 README 참고.")
     up = st.file_uploader("Excel / CSV", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
     if st.button("샘플 데이터로 해보기"):
         ss.file_key = "sample"
@@ -197,14 +199,23 @@ with st.container(border=True):
                                  index=opt.index(auto["issue"]) if "issue" in auto else 0)
         stt_col = c4.selectbox("STT 결과 컬럼 (선택)", opt,
                                index=opt.index(auto["stt"]) if "stt" in auto else 0)
-        st.caption(f"`{ss.src_name}` · {len(df)}행")
+        test_mode = is_test_result(df)
+        if test_mode:
+            tsum = tester_summary(df)
+            st.success(f"테스트 결과 시트로 인식했습니다 — 시험자 {len(tsum)}명, 실행 {len(df)}건 "
+                       f"(pass {int(tsum['pass'].sum())} / fail {int(tsum['fail'].sum())}). "
+                       "pass는 정상으로, fail은 비고 내용을 문제점으로 보고 분류합니다.")
+            st.dataframe(tsum, hide_index=True, width="content",
+                         column_config={"fail 비율": st.column_config.NumberColumn(format="percent")})
+        st.caption(f"`{ss.src_name}` · {len(df)}행" + (" (시험자별 실행 1건 = 1행으로 펼침)" if test_mode else ""))
         st.dataframe(df.head(5), width="stretch", hide_index=True)
 
         if st.button("② 분석 · ③ 분류 실행", type="primary", disabled=utt_col == resp_col):
             data = df[df[utt_col].astype(str).str.strip() != ""]
             ss.result = run(data, utt_col, resp_col, rules,
                             stt_col=None if stt_col == "(없음)" else stt_col,
-                            issue_col=None if issue_col == "(없음)" else issue_col, use_model=use_model)
+                            issue_col=None if issue_col == "(없음)" else issue_col, use_model=use_model,
+                            result_col=auto.get("result"))
             ss.run_at = datetime.now()
             st.rerun()
 
@@ -246,14 +257,14 @@ with st.container(border=True):
         view = view[view["관련시스템"].map(lambda v: any(t in str(v).split(", ") for t in types))]
 
     show_cols = [c for c in ["사용자 발화", "실제 응답", "문제점", "관련시스템", "세부 이슈", "등급", "판단 근거",
-                             "검토 필요", "신뢰도", "보조 이슈", "규칙 판정", "관련시스템(QA)", "등급(QA)"] if c in res.columns]
+                             "검토 필요", "신뢰도", "보조 이슈", "규칙 판정", "판정", "SAID", "관련시스템(QA)", "등급(QA)"] if c in res.columns]
     if "모델 예측" in res.columns:
         show_cols.append("모델 예측")
     st.caption("관련시스템·세부 이슈·등급·판단 근거·검토 필요 칸은 직접 수정할 수 있습니다. 수정 내용은 리포트에 반영됩니다. "
                "관련시스템은 여러 개일 수 있습니다 (예: 대화 정책, GA).")
     edited = st.data_editor(
         view[show_cols], width="stretch", hide_index=True, key="editor",
-        disabled=["사용자 발화", "실제 응답", "문제점", "보조 이슈", "신뢰도", "규칙 판정", "관련시스템(QA)", "등급(QA)"],
+        disabled=["사용자 발화", "실제 응답", "문제점", "보조 이슈", "신뢰도", "규칙 판정", "판정", "SAID", "관련시스템(QA)", "등급(QA)"],
         column_config={
             "관련시스템": st.column_config.TextColumn(width=150, help="여러 개는 쉼표로: 대화 정책, GA, 홈포털"),
             "등급": st.column_config.SelectboxColumn(options=GRADES + [""], width=80),
@@ -285,6 +296,11 @@ with st.container(border=True):
     k[2].metric("이슈율", f"{s['issue_rate']:.0%}")
     k[3].metric("검토 필요", s["review"])
 
+    tst = report.tester_stats(res)
+    if not tst.empty:
+        st.markdown("**시험자별 테스트 결과**")
+        st.dataframe(tst, hide_index=True, width="content",
+                     column_config={"fail 비율": st.column_config.NumberColumn(format="percent")})
     gcols = st.columns(len(GRADES))
     for col, g in zip(gcols, GRADES):
         col.metric(g, s["by_grade"].get(g, 0), help=GRADE_DESC[g])
@@ -329,6 +345,12 @@ with st.container(border=True):
                        width="stretch")
     d2.download_button("🌐 HTML 리포트", report.to_html(res), f"{stem}_QA리포트.html", "text/html",
                        width="stretch")
-    d3.download_button("📝 원본 양식에 등급·관련시스템 채워 받기", report.fill_original(ss.df, res),
-                       f"{stem}_등급분류.xlsx", width="stretch",
-                       help="올린 시트의 컬럼 순서 그대로, 등급·관련시스템을 채우고 세부 이슈·판단 근거·검토 필요를 뒤에 붙입니다.")
+    if is_test_result(res):
+        d3.download_button(f"📝 이슈리스트 양식으로 받기 (fail {s['issues']}건)", report.to_issue_list(res),
+                           f"{stem}_이슈리스트.xlsx", width="stretch",
+                           help="fail 건만 모아 순번·등급·경로·방법·결과·기대·문제점·특이사항·관련시스템·시험자·SAID·재현일시 "
+                                "양식으로 만듭니다 (세부 이슈·판단 근거·검토 필요는 뒤에 추가).")
+    else:
+        d3.download_button("📝 원본 양식에 등급·관련시스템 채워 받기", report.fill_original(ss.df, res),
+                           f"{stem}_등급분류.xlsx", width="stretch",
+                           help="올린 시트의 컬럼 순서 그대로, 등급·관련시스템을 채우고 세부 이슈·판단 근거·검토 필요를 뒤에 붙입니다.")

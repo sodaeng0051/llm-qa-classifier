@@ -113,6 +113,56 @@ def fill_original(original: pd.DataFrame, res: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+ISSUE_LIST_COLS = ["순번", "등급", "경로", "방법", "결과", "기대", "문제점", "특이사항", "관련시스템", "시험자", "SAID", "재현일시"]
+
+
+def tester_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """테스트 결과 시트일 때 시험자별 pass / fail."""
+    if "판정" not in df.columns or "SAID" not in df.columns:
+        return pd.DataFrame()
+    from .testsheet import summary as _s
+    return _s(df)
+
+
+def to_issue_list(res: pd.DataFrame) -> bytes:
+    """테스트 결과(pass/fail) → fail 건만 모아 이슈리스트 양식 Excel로.
+    컬럼: 순번 · 등급 · 경로 · 방법 · 결과 · 기대 · 문제점 · 특이사항 · 관련시스템 · 시험자 · SAID · 재현일시
+    (+ 세부 이슈 · 판단 근거 · 검토 필요 · TC 순번 · 구분)"""
+    f = res[res["관련시스템"] != "정상"].copy()
+    if "SAID" in f.columns:   # 시험자별로 묶기 (시트에 나온 순서)
+        order = {s: i for i, s in enumerate(dict.fromkeys(f["SAID"]))}
+        f = f.assign(_o=f["SAID"].map(order)).sort_values("_o", kind="stable").drop(columns="_o")
+    get = lambda c: f[c].astype(str) if c in f.columns else pd.Series("", index=f.index)
+    out = pd.DataFrame({
+        "순번": range(1, len(f) + 1), "등급": get("등급"), "경로": get("시험방법"),
+        "방법": get("사용자 발화").map(lambda u: f'"{u}" 발화' if u else ""), "결과": "",
+        "기대": get("실제 응답"), "문제점": get("문제점"), "특이사항": "", "관련시스템": get("관련시스템"),
+        "시험자": "", "SAID": get("SAID"), "재현일시": get("재현일시"),
+        "세부 이슈": get("세부 이슈"), "판단 근거": get("판단 근거"), "검토 필요": get("검토 필요"),
+        "TC 순번": get("순번"), "구분": get("구분"),
+    })
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+        title = xw.book.add_format({"bold": True, "font_size": 14})
+        hdr = xw.book.add_format({"bold": True, "bg_color": "#1f2937", "font_color": "white", "border": 1})
+        new = xw.book.add_format({"bold": True, "bg_color": "#2563eb", "font_color": "white", "border": 1})
+        wrap = xw.book.add_format({"text_wrap": True, "valign": "top"})
+        out.to_excel(xw, sheet_name="이슈리스트", index=False, startrow=2)
+        w = xw.sheets["이슈리스트"]
+        w.write(0, 0, "📌 이슈리스트", title)
+        for j, c in enumerate(out.columns):
+            w.write(2, j, c, new if c in ("등급", "관련시스템", "세부 이슈", "판단 근거", "검토 필요") else hdr)
+            w.set_column(j, j, 40 if c in ("방법", "기대", "문제점", "판단 근거", "경로") else 12,
+                         wrap if c in ("방법", "기대", "문제점", "판단 근거", "경로") else None)
+        w.freeze_panes(3, 0)
+        if len(out):
+            w.autofilter(2, 0, 2 + len(out), len(out.columns) - 1)
+        ts = tester_stats(res)
+        if not ts.empty:
+            ts.to_excel(xw, sheet_name="시험자별 결과", index=False)
+    return buf.getvalue()
+
+
 def _ordered(df: pd.DataFrame) -> pd.DataFrame:
     rest = [c for c in df.columns if c not in MAIN_COLS]
     return df[[c for c in MAIN_COLS if c in df.columns] + rest]
@@ -151,6 +201,10 @@ def to_excel(df: pd.DataFrame) -> bytes:
             ws.write(3 + i, 0, k, bold)
             ws.write(3 + i, 1, v, f)
         r = 4 + len(kpis)
+        tst = tester_stats(df)
+        if not tst.empty:
+            ws.write(r, 0, "시험자별 테스트 결과", bold)
+            r = table(ws, r + 1, 0, tst, ("fail 비율",)) + 1
         ws.write(r, 0, "관련시스템별 통계", bold)
         ts = type_stats(df)
         end = table(ws, r + 1, 0, ts, ("비율",))
@@ -246,6 +300,7 @@ th{{background:var(--card);white-space:nowrap}} .g-Critical{{background:var(--cr
 <h1>LLM QA 이슈 분석 리포트</h1><div class="muted">생성 {s['generated_at']} · 외부 API 미사용(규칙/로컬 모델 분석)</div>
 <div class="kpis"><div class="kpi">전체<b>{s['total']}</b></div><div class="kpi">이슈<b>{s['issues']}</b></div>
 <div class="kpi">검토 필요<b>{s['review']}</b></div>{grades}</div>
+{"<h2>시험자별 테스트 결과</h2>" + table(tester_stats(df)) if not tester_stats(df).empty else ""}
 <h2>관련시스템별 통계</h2>{bars}{table(ts)}
 <h2>관련시스템 조합</h2>{table(combo_stats(df))}
 <h2>관련시스템 × 등급</h2>{table(grade_matrix(df))}
