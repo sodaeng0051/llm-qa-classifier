@@ -27,10 +27,16 @@ def main():
     resp = args.response_col or cols.get("response")
     if not utt or not resp:
         sys.exit(f"발화/응답 컬럼을 찾지 못했습니다. 컬럼: {list(df.columns)}  → --utterance-col/--response-col 지정")
-    result = run(df, utt, resp, load_rules(), cols.get("stt"), cols.get("issue"), use_model=not args.no_model)
+    result = run(df, utt, resp, load_rules(), cols.get("stt"), cols.get("issue"), use_model=not args.no_model,
+                 result_col=cols.get("result"))
     print(f"컬럼 인식: 발화={utt}, 응답={resp}, 문제점={cols.get('issue')}, STT={cols.get('stt')}")
     out = Path(args.output or Path(args.input).with_name(Path(args.input).stem + "_QA리포트.xlsx"))
     out.write_bytes(report.to_excel(result))
+    if cols.get("result"):   # 테스트 결과 시트 → fail 건을 이슈리스트 양식으로도 저장
+        il = out.with_name(Path(args.input).stem + "_이슈리스트.xlsx")
+        il.write_bytes(report.to_issue_list(result))
+        print(report.tester_stats(result).to_string(index=False))
+        print(f"이슈리스트: {il}")
     s = report.summary(result)
     print(f"전체 {s['total']}건 | 이슈 {s['issues']}건 ({s['issue_rate']:.0%}) | 검토 필요 {s['review']}건")
     print("등급:", s["by_grade"])
