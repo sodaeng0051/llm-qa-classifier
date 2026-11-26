@@ -35,7 +35,7 @@ MIN_SAMPLES = 20
 # ───────────────────────── 라벨 정리 ─────────────────────────
 def norm_systems(value) -> list[str]:
     """'대화정책, GA' / '대화 정책,GA' → ['대화 정책', 'GA'] (SYSTEMS 순서)"""
-    parts = {re.sub(r"\s+", "", p) for p in re.split(r"[,/\n·]", str(value or "")) if p.strip()}
+    parts = {re.sub(r"\s+", "", p) for p in re.split(r"[,/\n·+]", str(value or "")) if p.strip()}
     return [s for s in SYSTEMS if s.replace(" ", "") in parts]
 
 

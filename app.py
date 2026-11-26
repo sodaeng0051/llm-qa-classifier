@@ -102,8 +102,9 @@ with st.sidebar:
                    "저장하면 바로 다시 학습합니다.")
         gdf = st.data_editor(local_model.load_guideline(), num_rows="dynamic", hide_index=True, key="guide_ed",
                              column_config={
-                                 "관련시스템": st.column_config.SelectboxColumn(
-                                     options=local_model.SYSTEMS, required=True, width="small"),
+                                 "관련시스템": st.column_config.TextColumn(
+                                     width="small", required=True,
+                                     help="여러 개를 함께 붙이는 기준은 '대화 정책, GA'처럼 쉼표로 적으세요."),
                                  "판단 기준": st.column_config.TextColumn(width="medium"),
                                  "대표 이슈": st.column_config.TextColumn(width="medium")})
         gup = st.file_uploader("분류표 파일로 바꾸기 (관련시스템 · 판단 기준 · 대표 이슈 컬럼)", type=["csv", "xlsx"],
