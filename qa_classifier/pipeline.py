@@ -7,7 +7,7 @@ import pandas as pd
 
 from . import model as local_model
 from .analyzer import INTENT_LABELS, RESPONSE_LABELS, analyze
-from .classifier import analysis_note, apply_grade_override, judge_with_desc
+from .classifier import analysis_note, apply_grade_override, judge_with_desc, match_desc
 from .testsheet import is_test_sheet, parse_test_sheet
 
 # 앞쪽 별칭일수록 우선. 값이 전부 비어 있는 컬럼은 건너뛴다.
@@ -15,7 +15,8 @@ COLUMN_ALIASES = {
     "utterance": ["사용자 발화", "사용자발화", "발화", "발화문", "질의", "사용자 입력", "테스트 발화", "방법",
                   "utterance", "query"],
     "response": ["실제 응답", "실제응답", "응답", "답변", "시스템 응답", "결과", "기대", "response", "answer"],
-    "issue": ["문제점", "이슈 내용", "이슈내용", "현상", "문제", "오류 내용", "issue", "problem"],
+    "issue": ["문제점", "이슈설명", "이슈 설명", "이슈 내용", "이슈내용", "이슈 상세", "문제 설명", "오류 설명", "현상 설명",
+              "현상", "문제", "오류 내용", "issue description", "issue", "problem"],
     "stt": ["stt", "stt 결과", "인식 결과", "인식결과", "asr", "음성인식 결과"],
 }
 HEADER_HINTS = {a.lower() for v in COLUMN_ALIASES.values() for a in v} | {"순번", "no", "번호", "등급", "시험자"}
@@ -59,6 +60,15 @@ def _load(raw: pd.DataFrame) -> pd.DataFrame:
     """테스트 결과 시트(시험자별 pass/fail)면 실행 1건당 1행으로 펼치고, 아니면 헤더를 찾아 정리한다."""
     raw = raw.fillna("").astype(str)
     return parse_test_sheet(raw) if is_test_sheet(raw) else _tidy(raw)
+
+
+def is_issue_list(df: pd.DataFrame, cols: dict) -> bool:
+    """이슈리스트(모든 행이 이슈)인지: 문제점 컬럼이나 값이 있는 '등급' 컬럼이 있으면 이슈리스트로 본다.
+    테스트 결과 시트(pass/fail)는 pass 행이 정상이므로 제외."""
+    if is_test_result(df):
+        return False
+    has_grade = any(str(c).strip() == "등급" and (df[c].astype(str).str.strip() != "").any() for c in df.columns)
+    return bool(cols.get("issue")) or has_grade
 
 
 def is_test_result(df: pd.DataFrame) -> bool:
@@ -107,10 +117,10 @@ def detect_columns(df: pd.DataFrame) -> dict:
 RULE_STRONG = ("음성인식", "음성합성")   # 규칙 정밀도가 높아 모델 결과에 더해 주는 관련시스템
 
 
-def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
+def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict, issue_list: bool = False) -> dict:
     """규칙 판정(세부 이슈·근거 문구)과 학습 모델 판정(관련시스템·등급·유사 이슈)을 합친다."""
     # 학습 데이터는 이슈리스트(문제 있는 건)만 있어 '정상'을 모른다 → 문제점 기술이 없고 규칙상 정상이면 그대로 둔다
-    if not str(desc or "").strip() and rule_row["관련시스템"] == "정상":
+    if not issue_list and not str(desc or "").strip() and rule_row["관련시스템"] == "정상":
         return {"관련시스템": "정상", "등급": "", "세부 이슈": "", "판단 근거": rule_row["판단 근거"],
                 "신뢰도": rule_row["신뢰도"], "_review": False}
     systems = local_model.norm_systems(pr["systems"])
@@ -120,9 +130,17 @@ def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
     grade = pr["grade"] or rule_row["등급"]
     grade, note = apply_grade_override(desc or "", grade, rules)
 
-    parts = []
+    # 세부 이슈·근거 문구는 최종 관련시스템과 맞는 규칙에서만 가져온다 (설명이 판정과 어긋나지 않도록)
+    sub, rule_reason, rule_note = "", "", ""
     if rule_hit:
-        parts.append(str(rule_row["판단 근거"]).split(" · 등급 보정")[0])
+        hits = match_desc(desc or "", rules)
+        same = [h for h in hits if h[1]["type"] in systems]
+        if same:
+            _, r0, ph = same[0]
+            sub, rule_reason = r0.get("sub", ""), f"{r0['reason']} [근거: '{ph}']"
+        else:
+            rule_note = f"키워드 규칙은 '{rule_row['관련시스템']}'로 보았으나 과거 판정 기준으로 다르게 판단"
+    parts = [rule_reason] if rule_reason else []
     nb = pr["neighbors"][0] if pr["neighbors"] else None
     if nb:
         snippet = re.sub(r"\s+", " ", nb["문제점"]).strip()[:45]
@@ -130,6 +148,8 @@ def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
                      f"{nb['관련시스템'] or '-'} / {nb['등급'] or '-'} (유사도 {nb['sim']:.0%})")
     if note:
         parts.append(f"등급 보정({note})")
+    if rule_note:
+        parts.append(rule_note)
 
     sys_str = local_model.join_systems(systems) or rule_row["관련시스템"]
     # 아주 비슷한 과거 이슈와 판정이 다르면 검토 (과거 판정 자체가 회차마다 다를 수 있음)
@@ -140,17 +160,18 @@ def _merge(rule_row: pd.Series, pr: dict, desc: str, rules: dict) -> dict:
         parts.append("유사 과거 이슈와 판정이 달라 확인 필요")
     if novel:
         parts.append("비슷한 과거 이슈가 없어 확인 필요 (새 유형일 수 있음)")
-    return {"관련시스템": sys_str, "등급": grade, "세부 이슈": rule_row["세부 이슈"] if rule_hit else "",
+    return {"관련시스템": sys_str, "등급": grade, "세부 이슈": sub,
             "판단 근거": " · ".join(parts) or rule_row["판단 근거"], "신뢰도": pr["confidence"],
             "_review": disagree or novel}
 
 
 def run(df: pd.DataFrame, utt_col: str, resp_col: str, rules: dict,
         stt_col: str | None = None, issue_col: str | None = None, use_model: bool = True,
-        model=None, result_col: str | None = None) -> pd.DataFrame:
+        model=None, result_col: str | None = None, issue_list: bool = False) -> pd.DataFrame:
     """원본 컬럼은 그대로 두고 분석·분류 결과 컬럼을 덧붙인 DataFrame을 반환.
 
     result_col(pass/fail)이 있으면 pass 행은 '정상'으로 두고 fail 행만 분류한다.
+    issue_list=True(이슈리스트)면 모든 행이 이슈이므로 '정상'으로 판정하지 않는다.
     """
     if result_col:
         passed = df[result_col].astype(str).str.strip().str.lower().eq("pass")
@@ -186,7 +207,7 @@ def run(df: pd.DataFrame, utt_col: str, resp_col: str, rules: dict,
     model = model if model is not None else (local_model.load() if use_model else None)
     if model is not None and len(df):
         preds = local_model.predict(model, utts, df[resp_col].astype(str), descs)
-        merged = [_merge(res.loc[idx], pr, descs[idx], rules) for idx, pr in zip(res.index, preds)]
+        merged = [_merge(res.loc[idx], pr, descs[idx], rules, issue_list) for idx, pr in zip(res.index, preds)]
         m = pd.DataFrame(merged, index=res.index)
         res["규칙 판정"] = res["관련시스템"].astype(str) + " / " + res["등급"].astype(str)
         for c in m.columns:
@@ -204,6 +225,12 @@ def run(df: pd.DataFrame, utt_col: str, resp_col: str, rules: dict,
             merged_sys.append(local_model.join_systems([sys_] + others) if others else sys_)
         crossed = pd.Series([m != o for m, o in zip(merged_sys, res["관련시스템"])], index=res.index)
         res["관련시스템"] = merged_sys
+
+    if issue_list:   # 이슈리스트 행은 정상일 수 없다 (학습 모델을 끈 경우 등)
+        ok = res["관련시스템"] == "정상"
+        res.loc[ok, "관련시스템"] = "미분류"
+        res.loc[ok, "판단 근거"] = "이슈리스트 행이지만 문제점 기술이 없어 관련시스템을 판단할 수 없음"
+        res.loc[ok, "신뢰도"] = 0.0
 
     need = ((res["신뢰도"] < p["review_threshold"])
             | res["관련시스템"].map(lambda v: any(t in str(v).split(", ") for t in p.get("always_review_types", [])))

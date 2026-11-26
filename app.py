@@ -12,7 +12,7 @@ import streamlit as st
 
 from qa_classifier import model as local_model
 from qa_classifier import report
-from qa_classifier.pipeline import detect_columns, is_test_result, read_sheet, run
+from qa_classifier.pipeline import detect_columns, is_issue_list, is_test_result, read_sheet, run
 from qa_classifier.testsheet import summary as tester_summary
 from qa_classifier.rules import (GRADE_DESC, GRADES, ISSUE_TYPE_DESC, ISSUE_TYPES, load_rules, reset_rules,
                                  save_rules)
@@ -239,6 +239,9 @@ with st.container(border=True):
                        "pass는 정상으로, fail은 비고 내용을 문제점으로 보고 분류합니다.")
             st.dataframe(tsum, hide_index=True, width="content",
                          column_config={"fail 비율": st.column_config.NumberColumn(format="percent")})
+        if not test_mode and issue_col == "(없음)" and is_issue_list(df, {}):
+            st.warning("이슈리스트(등급 컬럼이 있는 시트)로 보이는데 문제점 컬럼을 찾지 못했습니다. "
+                       "이슈 설명이 적힌 컬럼을 '문제점 컬럼'에서 직접 골라 주세요. 문제점 없이는 정확도가 크게 떨어집니다.")
         st.caption(f"`{ss.src_name}` · {len(df)}행" + (" (시험자별 실행 1건 = 1행으로 펼침)" if test_mode else ""))
         st.dataframe(df.head(5), width="stretch", hide_index=True)
 
@@ -247,7 +250,8 @@ with st.container(border=True):
             ss.result = run(data, utt_col, resp_col, rules,
                             stt_col=None if stt_col == "(없음)" else stt_col,
                             issue_col=None if issue_col == "(없음)" else issue_col, use_model=use_model,
-                            result_col=auto.get("result"))
+                            result_col=auto.get("result"),
+                            issue_list=is_issue_list(df, {"issue": None if issue_col == "(없음)" else issue_col}))
             ss.run_at = datetime.now()
             st.rerun()
 
