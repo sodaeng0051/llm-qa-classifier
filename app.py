@@ -97,6 +97,38 @@ with st.sidebar:
     use_model = st.toggle("학습 모델 사용", value=tsum["total"] >= local_model.MIN_SAMPLES,
                           disabled=tsum["total"] < local_model.MIN_SAMPLES,
                           help="끄면 키워드 규칙만으로 분류합니다.")
+    with st.expander(f"관련시스템 분류표 ({tsum['guideline']}행{', 수정됨' if tsum['guideline_custom'] else ''})"):
+        st.caption("분류 기준표의 판단 기준·대표 이슈 문장도 학습에 씁니다. 대표 이슈는 쉼표로 구분하세요. "
+                   "저장하면 바로 다시 학습합니다.")
+        gdf = st.data_editor(local_model.load_guideline(), num_rows="dynamic", hide_index=True, key="guide_ed",
+                             column_config={
+                                 "관련시스템": st.column_config.TextColumn(
+                                     width="small", required=True,
+                                     help="여러 개를 함께 붙이는 기준은 '대화 정책, GA'처럼 쉼표로 적으세요."),
+                                 "판단 기준": st.column_config.TextColumn(width="medium"),
+                                 "대표 이슈": st.column_config.TextColumn(width="medium")})
+        gup = st.file_uploader("분류표 파일로 바꾸기 (관련시스템 · 판단 기준 · 대표 이슈 컬럼)", type=["csv", "xlsx"],
+                               key="guide_up")
+        b1, b2 = st.columns(2)
+        if b1.button("분류표 저장", width="stretch"):
+            new = gdf
+            if gup is not None:
+                new = pd.read_csv(gup, dtype=str) if gup.name.lower().endswith(".csv") else pd.read_excel(gup, dtype=str)
+                new.columns = [str(c).strip() for c in new.columns]
+                if not {"관련시스템", "대표 이슈"} <= set(new.columns):
+                    st.error("파일에 '관련시스템', '대표 이슈' 컬럼이 필요합니다. ('분류' 컬럼명도 인식)")
+                    new = None
+            if new is not None:
+                new = new.rename(columns={"분류": "관련시스템"})
+                local_model.save_guideline(new)
+                with st.spinner("분류표 반영 중 (모델 재학습)..."):
+                    local_model.train(evaluate=False)
+                ss.flash = f"관련시스템 분류표 {len(local_model.load_guideline())}행 저장 · 모델 재학습 완료"
+                st.rerun()
+        if b2.button("기본 분류표로", width="stretch", disabled=not tsum["guideline_custom"]):
+            local_model.reset_guideline()
+            ss.flash = "기본 관련시스템 분류표로 되돌렸습니다."
+            st.rerun()
     with st.expander("과거 이슈리스트로 추가 학습"):
         st.caption("등급·관련시스템이 입력된 과거 시트를 올리면 학습 데이터에 추가됩니다. 같은 행은 최신으로 덮어씁니다.")
         hist = st.file_uploader("이슈리스트 (여러 개 가능)", type=["csv", "xlsx"], accept_multiple_files=True,
@@ -240,8 +272,8 @@ with st.container(border=True):
     st.subheader("③ 이슈 유형 자동 분류")
     g1, g2, _ = st.columns([1, 1, 4])
     with g1.popover("관련시스템 기준"):
-        for t in ISSUE_TYPES:
-            st.markdown(f"**{t}** — {ISSUE_TYPE_DESC[t]}")
+        for r in local_model.load_guideline().itertuples(index=False):
+            st.markdown(f"**{r[0]}** — {r[1]}  \n대표 이슈: {r[2]}")
     with g2.popover("등급 기준"):
         for g in GRADES:
             st.markdown(f"**{g}** — {GRADE_DESC[g]}")
