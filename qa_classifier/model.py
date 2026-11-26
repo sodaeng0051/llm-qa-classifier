@@ -43,9 +43,14 @@ def join_systems(systems) -> str:
     return ", ".join(s for s in SYSTEMS if s in set(systems))
 
 
+GRADE_ALIASES = {"검토요청": "Request", "검토 요청": "Request", "request": "Request"}
+
+
 def norm_grade(value) -> str:
-    v = str(value or "").strip().lower()
-    return next((g for g in GRADES if g.lower() == v), "")
+    """'major' → 'Major', '검토요청' → 'Request'"""
+    v = str(value or "").strip()
+    v = GRADE_ALIASES.get(v, GRADE_ALIASES.get(v.lower(), v))
+    return next((g for g in GRADES if g.lower() == v.lower()), "")
 
 
 def source_name(filename: str) -> str:
