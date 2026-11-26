@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import report
-from .pipeline import detect_columns, read_sheet, run
+from .pipeline import detect_columns, is_issue_list, read_sheet, run
 from .rules import load_rules
 
 
@@ -28,7 +28,7 @@ def main():
     if not utt or not resp:
         sys.exit(f"발화/응답 컬럼을 찾지 못했습니다. 컬럼: {list(df.columns)}  → --utterance-col/--response-col 지정")
     result = run(df, utt, resp, load_rules(), cols.get("stt"), cols.get("issue"), use_model=not args.no_model,
-                 result_col=cols.get("result"))
+                 result_col=cols.get("result"), issue_list=is_issue_list(df, cols))
     print(f"컬럼 인식: 발화={utt}, 응답={resp}, 문제점={cols.get('issue')}, STT={cols.get('stt')}")
     out = Path(args.output or Path(args.input).with_name(Path(args.input).stem + "_QA리포트.xlsx"))
     out.write_bytes(report.to_excel(result))
